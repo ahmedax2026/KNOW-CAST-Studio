@@ -139,8 +139,26 @@ class TranscriptionThread(QThread):
         if process.returncode:
             self.failed.emit(process.stderr[-1200:])
         else:
-            workdir.cleanup()
             self.finished_ok.emit(self.output)
+
+
+class CutoutThread(QThread):
+    finished_ok = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, source, output):
+        super().__init__()
+        self.source, self.output = source, output
+
+    def run(self):
+        try:
+            from PIL import Image
+            from rembg import remove, new_session
+            result = remove(Image.open(self.source).convert('RGB'), session=new_session('isnet-general-use'))
+            result.save(self.output)
+            self.finished_ok.emit(self.output)
+        except Exception as exc:
+            self.failed.emit(str(exc))
 
 
 class AnimationThread(QThread):
@@ -263,6 +281,9 @@ class MainWindow(QMainWindow):
         preview = QPushButton('معاينة المشهد')
         preview.clicked.connect(self.preview_scene)
         top_actions.addWidget(preview)
+        cutout = QPushButton('قص خلفية شخصية')
+        cutout.clicked.connect(self.cutout_portrait)
+        top_actions.addWidget(cutout)
         transcribe = QPushButton('تفريغ الكلام تلقائيًا')
         transcribe.clicked.connect(self.transcribe_audio)
         top_actions.addWidget(transcribe)
@@ -300,6 +321,25 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getOpenFileName(self, 'اختر ملفًا', '', filters)
         if path:
             field.setText(path)
+
+    def cutout_portrait(self):
+        from PySide6.QtWidgets import QInputDialog
+        label, accepted = QInputDialog.getItem(self, 'قص الخلفية', 'اختر الصورة:', ['المذيع', 'الخبير'], 0, False)
+        if not accepted:
+            return
+        field = self.host_image if label == 'المذيع' else self.guest_image
+        source = field.text().strip()
+        if not Path(source).is_file():
+            QMessageBox.warning(self, 'الصورة', 'اختر صورة الشخصية أولًا')
+            return
+        target, _ = QFileDialog.getSaveFileName(self, 'حفظ صورة شفافة', str(Path(source).with_name(Path(source).stem + '_cutout.png')), 'PNG (*.png)')
+        if not target:
+            return
+        self.status_label.setText('جارٍ قص الخلفية... قد يُنزّل النموذج أول مرة')
+        self.cutout_worker = CutoutThread(source, target)
+        self.cutout_worker.finished_ok.connect(lambda path: (field.setText(path), self.status_label.setText('الصورة الشفافة جاهزة'), QMessageBox.information(self, 'تم', path)))
+        self.cutout_worker.failed.connect(lambda error: QMessageBox.critical(self, 'تعذر قص الخلفية', error))
+        self.cutout_worker.start()
 
     def values(self):
         return dict(audio=self.audio.text().strip(), logo=self.logo.text().strip(), subtitles=self.subtitles.text().strip(), title=self.title.text().strip(), subtitle=self.subtitle.text().strip(), footer=self.footer.text().strip(), host=self.host.text().strip(), guest=self.guest.text().strip(), host_image=self.host_image.text().strip(), guest_image=self.guest_image.text().strip(), studio=self.studio.text().strip(), composed_scene=self.composed_scene.text().strip(), theme=self.theme.currentText(), encoder=self.encoder.currentText(), language=self.language.currentData(), animation_backend=self.animation_backend.currentText(), animation_device=self.animation_device.currentText(), animation_size=int(self.animation_size.currentText()), threads=self.threads.value(), engine=self.engine.text().strip())
